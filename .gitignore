@@ -1,0 +1,20 @@
+# Training artefacts — kept locally, never committed
+checkpoints/
+tb/
+outputs/
+results/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
