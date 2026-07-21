@@ -70,6 +70,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**Note on pettingzoo:** requirements.txt pins `pettingzoo==1.24.3`. Newer
+pettingzoo releases renamed `agent_selector` in a way that breaks sumo-rl
+1.4.5's import (`TypeError: 'module' object is not callable`). Don't
+upgrade pettingzoo independently unless you also confirm sumo-rl still
+imports cleanly.
+
 ### 3. Verify
 
 ```bash
@@ -147,26 +153,43 @@ training will be ~10× faster.
 
 ### Running the notebook from WSL
 
-Easiest: VS Code with the WSL extension.
+**Important: `code .` must be run from inside a WSL terminal, not from
+PowerShell/CMD reaching into the WSL filesystem.** If VS Code opens the
+project via a `\\wsl.localhost\...` UNC path (i.e. you launched it from
+Windows), the Python interpreter picker will show your `.venv` kernel as
+"broken" — Windows can't execute the Linux ELF binaries inside
+`.venv/bin/`.
 
-1. Install [VS Code](https://code.visualstudio.com/) on Windows.
-2. Install the "WSL" extension (search WSL in the extensions panel).
-3. From inside WSL: `cd ~/traffic-optimization-RL && code .`
-4. Open `experiments.ipynb` and run cells. VS Code will use the WSL venv as the kernel.
+Correct way:
 
-Alternative: install Jupyter inside WSL and forward the port:
+1. Install the **"WSL"** extension in VS Code (publisher: Microsoft).
+2. Open a WSL terminal (`wsl` from PowerShell, or the Ubuntu app).
+3. `cd ~/traffic-optimization-RL && code .`
+4. Confirm the bottom-left corner of VS Code shows a green
+   `WSL: Ubuntu-22.04` badge — that means the window itself is running
+   inside WSL, not just viewing WSL files from Windows.
+5. Open `experiments.ipynb`, select the `.venv` kernel — it should now
+   work rather than show "(broken)".
+
+If a kernel is still broken after that, re-run inside the WSL terminal:
+```bash
+source .venv/bin/activate
+pip install ipykernel
+python -m ipykernel install --user --name traffic-rl --display-name "Python (traffic-rl)"
+```
+then reload the VS Code window and pick "Python (traffic-rl)" explicitly.
+
+Alternative without VS Code: install Jupyter inside WSL and forward the port:
 ```bash
 pip install jupyter
 jupyter notebook --no-browser --port 8888
 # Then open http://localhost:8888 in your Windows browser
 ```
-Token will be in the terminal output.
 
 ### Caveats
 
 - Files under `/mnt/c/...` (Windows filesystem accessed from WSL) are *very*
-  slow. Keep the project under `~/` inside WSL. Use Git to sync with your
-  Windows checkout if needed.
+  slow. Keep the project under `~/` inside WSL.
 - The first training run will be slower than later ones — Python / SB3 cache
   warm-up.
 - `use_gui=True` won't work without an X server. Keep `use_gui=False` (the
@@ -189,4 +212,19 @@ results/
 
 Training artefacts (`checkpoints/`, `tb/`, `outputs/`) are in `.gitignore`
 and stay local. Only the `results/` outputs should be pushed.
-"# traffic-rl" 
+
+## Known gotchas already fixed in this codebase
+
+- **`evaluate.py` / `utils/evaluate.py`**: SB3's `EvalCallback` only logs
+  reward + episode length to `evaluations.npz` — sumo-rl's per-step traffic
+  CSVs never get written during its eval loop. `utils/evaluate.py` does
+  evaluation explicitly after training instead, capturing
+  `system_mean_waiting_time` etc. directly.
+- **`max_pressure.py` on multi-intersection scenarios**: `sumo_rl.parallel_env()`
+  wraps the real environment through several PettingZoo wrapper layers
+  before reaching the object that holds `.traffic_signals`. Naive attribute
+  chasing (`env.aec_env.env.traffic_signals`) breaks because
+  `SumoEnvironmentPZ` doesn't forward attribute lookups the way wrapper
+  classes do. `_find_traffic_signals()` walks the chain dynamically instead
+  of hardcoding a hop count, so it keeps working if sumo-rl or pettingzoo
+  restructure their wrappers in a future release.

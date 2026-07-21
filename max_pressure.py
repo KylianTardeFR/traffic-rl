@@ -57,6 +57,41 @@ def max_pressure_action(ts: sumo_rl.TrafficSignal) -> int:
     return best_phase
 
 
+def _find_traffic_signals(env):
+    """Walk the PettingZoo wrapper chain to find the dict of TrafficSignal objects.
+
+    sumo_rl.parallel_env() wraps the real env several layers deep:
+    parallel_wrapper -> .aec_env -> OrderEnforcingWrapper -> .env ->
+    AssertOutOfBoundsWrapper -> .env -> SumoEnvironmentPZ -> .env ->
+    SumoEnvironment (this last one actually holds .traffic_signals).
+
+    Wrapper classes forward unknown attribute lookups down to the next
+    layer automatically (__getattr__), but SumoEnvironmentPZ does NOT
+    forward — it stores the real env as an explicit `.env` attribute
+    instead. That's the layer naive attribute-chasing trips on. The
+    exact hop count can also change between sumo-rl/pettingzoo versions,
+    so we walk down via .aec_env then .env, checking each object's own
+    __dict__ directly (bypassing __getattr__ forwarding) until we find it.
+    """
+    obj = env
+    seen = set()
+    for _ in range(10):
+        if "traffic_signals" in getattr(obj, "__dict__", {}):
+            return obj.traffic_signals
+        nxt = getattr(obj, "aec_env", None)
+        if nxt is None:
+            nxt = getattr(obj, "env", None)
+        if nxt is None or id(nxt) in seen:
+            break
+        seen.add(id(nxt))
+        obj = nxt
+    raise AttributeError(
+        "Could not locate traffic_signals on the wrapped env — "
+        "the sumo-rl/pettingzoo wrapper chain may have changed shape. "
+        "Try printing type(env) and type(env.aec_env) to see the new chain."
+    )
+
+
 def _run_single(scenario, eval_seeds):
     net_file, route_file = _scenario_files(scenario)
     rows = []
@@ -125,14 +160,7 @@ def _run_marl(scenario, eval_seeds):
             reward_fn="queue",
         )
         obs, _ = env.reset()
-        # PettingZoo parallel_env exposes traffic_signals via .unwrapped on env_creator,
-        # but on the wrapper itself we use .aec_env or attribute lookup:
-        raw = env.unwrapped if hasattr(env, "unwrapped") else env
-        # sumo-rl's parallel wrapper exposes the underlying env via `env.aec_env.env`
-        # Fall back to attribute discovery:
-        traffic_signals = getattr(raw, "traffic_signals", None)
-        if traffic_signals is None and hasattr(env, "aec_env"):
-            traffic_signals = env.aec_env.env.traffic_signals
+        traffic_signals = _find_traffic_signals(env)
 
         n_agents = len(obs)
         waits, speeds, stopped = [], [], []
