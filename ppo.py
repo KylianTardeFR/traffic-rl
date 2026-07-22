@@ -3,7 +3,11 @@
     from ppo import train
     train()                                          # seed=42, default reward
     train(seed=43, reward_fn="pressure")
+
+If a previous run of the same config died partway, training resumes from
+the furthest checkpoint instead of starting over.
 """
+import time
 from pathlib import Path
 
 import gymnasium as gym
@@ -12,14 +16,19 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from utils.callbacks import TSCMetricsCallback
+from utils.resume import latest_checkpoint
+
+# Checkpoint often enough that a crash costs minutes, not hours
+SAVE_FREQ = 20_000
 
 
 def train(seed=42, reward_fn="diff-waiting-time",
           scenario="cologne1", timesteps=200_000):
     """Train PPO. Returns the path to the saved final model.
 
-    Skips training if a final model already exists, so the notebook
-    is restartable.
+    - If `final.zip` already exists, does nothing.
+    - If intermediate checkpoints exist, resumes from the furthest one.
+    - Otherwise trains from scratch.
     """
     tag = f"seed{seed}"
     if reward_fn != "diff-waiting-time":
@@ -31,7 +40,7 @@ def train(seed=42, reward_fn="diff-waiting-time",
     final_path = checkpoint_dir / "final.zip"
 
     if final_path.exists():
-        print(f"[ppo] {scenario}/{tag}: already trained, skipping")
+        print(f"[ppo] {scenario}/{tag}: done, skipping")
         return final_path
 
     sumo_path = Path(sumo_rl.__file__).parent
@@ -58,40 +67,54 @@ def train(seed=42, reward_fn="diff-waiting-time",
         sumo_warnings=False,
     )
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        tensorboard_log=str(tb_dir),
-        seed=seed,
-        verbose=1,
-        learning_rate=3.0e-4,
-        n_steps=1024,
-        batch_size=128,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-    )
+    # Resume if a partial run left checkpoints behind
+    ckpt_path, steps_done = latest_checkpoint(checkpoint_dir, "ppo")
+    if ckpt_path is not None and steps_done < timesteps:
+        print(f"[ppo] {scenario}/{tag}: resuming from {steps_done:,} steps")
+        model = PPO.load(str(ckpt_path), env=env, tensorboard_log=str(tb_dir))
+        remaining = timesteps - steps_done
+        reset_timesteps = False
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            tensorboard_log=str(tb_dir),
+            seed=seed,
+            verbose=0,   # quiet: watch progress in TensorBoard instead
+            learning_rate=3.0e-4,
+            n_steps=1024,
+            batch_size=128,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+        )
+        remaining = timesteps
+        reset_timesteps = True
 
     callbacks = [
         TSCMetricsCallback(),
-        CheckpointCallback(save_freq=50000, save_path=str(checkpoint_dir), name_prefix="ppo"),
+        CheckpointCallback(save_freq=SAVE_FREQ, save_path=str(checkpoint_dir),
+                           name_prefix="ppo"),
     ]
 
-    print(f"[ppo] training {scenario}/{tag} for {timesteps:,} steps")
+    print(f"[ppo] {scenario}/{tag}: training {remaining:,} steps ...", flush=True)
+    t0 = time.time()
     try:
         model.learn(
-            total_timesteps=timesteps,
+            total_timesteps=remaining,
             callback=callbacks,
             tb_log_name=scenario,
-            progress_bar=True,
+            reset_num_timesteps=reset_timesteps,
+            progress_bar=False,   # tqdm in a notebook over long runs bloats output
         )
-    finally:
+        # Only mark final if learn() actually completed
         model.save(str(final_path))
+        print(f"[ppo] {scenario}/{tag}: done in {(time.time() - t0) / 60:.1f} min", flush=True)
+    finally:
         env.close()
-        print(f"[ppo] saved -> {final_path}")
 
     return final_path

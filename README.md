@@ -7,7 +7,7 @@ benchmark scenarios (Cologne).
 
 ```
 traffic-optimization-rl/
-├── experiments.ipynb       # The single notebook — run top to bottom
+├── experiments.ipynb       # Everything — run top to bottom
 ├── ppo.py                  # train() — single-agent PPO (cologne1)
 ├── dqn.py                  # train() — single-agent DQN (cologne1)
 ├── ippo.py                 # train() — shared-policy IPPO (cologne3, cologne8)
@@ -15,7 +15,8 @@ traffic-optimization-rl/
 ├── max_pressure.py         # run()   — Varaiya max-pressure, any scenario
 ├── utils/
 │   ├── callbacks.py        # TSCMetricsCallback for TensorBoard
-│   └── evaluate.py         # evaluate() + evaluate_marl()
+│   ├── evaluate.py         # evaluate() + evaluate_marl()
+│   └── resume.py           # finds the last checkpoint to resume from
 ├── requirements.txt
 └── README.md
 ```
@@ -30,6 +31,9 @@ Three phases, run top to bottom:
 1. **Baselines** — fixed-time and max-pressure on cologne1, cologne3, cologne8 (5 seeds each).
 2. **Single-intersection RL** — PPO and DQN on cologne1 across 5 training seeds, plus a PPO reward-function ablation across 3 alternative rewards × 3 seeds.
 3. **Multi-intersection MARL** — shared-policy IPPO on cologne3 and cologne8, 3 seeds each.
+
+Training, evaluation, tables and plots all run from the notebook. The only
+optional terminal command is TensorBoard, if you want live learning curves.
 
 Every training cell is restartable: if `final.zip` already exists for a
 (scenario, algorithm, seed, reward) tuple, training is skipped. So you can
@@ -95,6 +99,41 @@ While training runs, monitor learning curves in a second terminal:
 ```bash
 tensorboard --logdir tb/
 ```
+
+## Long training runs — nothing is lost
+
+Training the full matrix takes many hours, and a notebook cell can be killed
+by a kernel restart, a VS Code disconnect, or the laptop sleeping. When that
+happens, **just re-run the cell** — no work is repeated:
+
+| What | On re-run |
+| --- | --- |
+| Training | Resumes from the last checkpoint (written every 20k steps) |
+| Baselines | Reads the cache in `results/cache/` — completed pairs skipped |
+| Evaluation | Reads the cache — completed models skipped |
+
+Re-running a fully finished cell takes seconds.
+
+The last cell of the notebook prints a status table showing which training
+jobs are done, partial (with a % complete), or not started. Run it any time.
+
+Two design choices support this:
+
+- **Training is split across several cells** (PPO seeds, DQN seeds, ablation,
+  cologne3, cologne8) rather than one giant cell, so less is in flight at once.
+- **Training output is quiet.** SB3's `verbose=1` prints a table every rollout
+  and `progress_bar=True` streams tqdm frames; over 25 long runs that bloats
+  the `.ipynb` file badly and is a common cause of kernel hangs. Each job
+  instead prints one line with its runtime. For live curves, run TensorBoard
+  from the VS Code terminal:
+
+```bash
+tensorboard --logdir tb/
+```
+
+DQN saves its replay buffer alongside each checkpoint so a resumed run doesn't
+restart exploration cold. Those `.pkl` files are ~50 MB each — delete
+`checkpoints/**/dqn_replay_buffer_*.pkl` once training is done if disk is tight.
 
 ## Linux performance on Windows — WSL2 + libsumo (10× speedup)
 

@@ -3,7 +3,12 @@
     from dqn import train
     train()                                          # seed=42, default reward
     train(seed=43, reward_fn="pressure")
+
+If a previous run of the same config died partway, training resumes from
+the furthest checkpoint (including its replay buffer) instead of starting
+over.
 """
+import time
 from pathlib import Path
 
 import gymnasium as gym
@@ -12,14 +17,18 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from utils.callbacks import TSCMetricsCallback
+from utils.resume import latest_checkpoint
+
+SAVE_FREQ = 20_000
 
 
 def train(seed=42, reward_fn="diff-waiting-time",
           scenario="cologne1", timesteps=200_000):
     """Train DQN. Returns the path to the saved final model.
 
-    Skips training if a final model already exists, so the notebook
-    is restartable.
+    - If `final.zip` already exists, does nothing.
+    - If intermediate checkpoints exist, resumes from the furthest one.
+    - Otherwise trains from scratch.
     """
     tag = f"seed{seed}"
     if reward_fn != "diff-waiting-time":
@@ -31,7 +40,7 @@ def train(seed=42, reward_fn="diff-waiting-time",
     final_path = checkpoint_dir / "final.zip"
 
     if final_path.exists():
-        print(f"[dqn] {scenario}/{tag}: already trained, skipping")
+        print(f"[dqn] {scenario}/{tag}: done, skipping")
         return final_path
 
     sumo_path = Path(sumo_rl.__file__).parent
@@ -58,41 +67,58 @@ def train(seed=42, reward_fn="diff-waiting-time",
         sumo_warnings=False,
     )
 
-    model = DQN(
-        policy="MlpPolicy",
-        env=env,
-        tensorboard_log=str(tb_dir),
-        seed=seed,
-        verbose=1,
-        learning_rate=1.0e-4,
-        buffer_size=50000,
-        learning_starts=5000,
-        batch_size=64,
-        tau=1.0,
-        gamma=0.99,
-        train_freq=4,
-        gradient_steps=1,
-        exploration_fraction=0.2,
-        exploration_final_eps=0.05,
-        target_update_interval=500,
-    )
+    ckpt_path, steps_done = latest_checkpoint(checkpoint_dir, "dqn")
+    if ckpt_path is not None and steps_done < timesteps:
+        print(f"[dqn] {scenario}/{tag}: resuming from {steps_done:,} steps")
+        model = DQN.load(str(ckpt_path), env=env, tensorboard_log=str(tb_dir))
+        # Restore the replay buffer too, otherwise DQN restarts exploration cold
+        buf = checkpoint_dir / f"dqn_replay_buffer_{steps_done}_steps.pkl"
+        if buf.exists():
+            model.load_replay_buffer(str(buf))
+            print(f"[dqn] restored replay buffer ({model.replay_buffer.size():,} transitions)")
+        remaining = timesteps - steps_done
+        reset_timesteps = False
+    else:
+        model = DQN(
+            policy="MlpPolicy",
+            env=env,
+            tensorboard_log=str(tb_dir),
+            seed=seed,
+            verbose=0,   # quiet: watch progress in TensorBoard instead
+            learning_rate=1.0e-4,
+            buffer_size=50000,
+            learning_starts=5000,
+            batch_size=64,
+            tau=1.0,
+            gamma=0.99,
+            train_freq=4,
+            gradient_steps=1,
+            exploration_fraction=0.2,
+            exploration_final_eps=0.05,
+            target_update_interval=500,
+        )
+        remaining = timesteps
+        reset_timesteps = True
 
     callbacks = [
         TSCMetricsCallback(),
-        CheckpointCallback(save_freq=50000, save_path=str(checkpoint_dir), name_prefix="dqn"),
+        CheckpointCallback(save_freq=SAVE_FREQ, save_path=str(checkpoint_dir),
+                           name_prefix="dqn", save_replay_buffer=True),
     ]
 
-    print(f"[dqn] training {scenario}/{tag} for {timesteps:,} steps")
+    print(f"[dqn] {scenario}/{tag}: training {remaining:,} steps ...", flush=True)
+    t0 = time.time()
     try:
         model.learn(
-            total_timesteps=timesteps,
+            total_timesteps=remaining,
             callback=callbacks,
             tb_log_name=scenario,
-            progress_bar=True,
+            reset_num_timesteps=reset_timesteps,
+            progress_bar=False,   # tqdm in a notebook over long runs bloats output
         )
-    finally:
         model.save(str(final_path))
+        print(f"[dqn] {scenario}/{tag}: done in {(time.time() - t0) / 60:.1f} min", flush=True)
+    finally:
         env.close()
-        print(f"[dqn] saved -> {final_path}")
 
     return final_path

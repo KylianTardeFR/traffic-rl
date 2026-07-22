@@ -4,9 +4,13 @@ Uses sumo_rl.parallel_env + SuperSuit to stack every intersection into a
 single SB3 vec env. One PPO policy is shared across every signal.
 
     from ippo import train
-    train(scenario="cologne3")                          # 3 intersections
-    train(scenario="cologne8", timesteps=800_000)       # 8 intersections, needs more steps
+    train(scenario="cologne3")
+    train(scenario="cologne8", timesteps=800_000)
+
+If a previous run of the same config died partway, training resumes from
+the furthest checkpoint instead of starting over.
 """
+import time
 from pathlib import Path
 
 import sumo_rl
@@ -14,13 +18,17 @@ import supersuit as ss
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 
+from utils.resume import latest_checkpoint
+
+SAVE_FREQ = 20_000
+
 
 def train(seed=42, reward_fn="diff-waiting-time",
           scenario="cologne3", timesteps=500_000):
     """Train shared-policy IPPO on a multi-intersection RESCO scenario.
 
     Note on `timesteps`: with N intersections, SB3 counts each env.step()
-    as N timesteps. 500k on cologne3 ≈ 166k SUMO steps; on cologne8 ≈ 62k.
+    as N timesteps. 500k on cologne3 = ~166k SUMO steps; on cologne8 = ~62k.
     For comparable depth, scale timesteps with N (e.g. 800k for cologne8).
     """
     tag = f"seed{seed}"
@@ -33,7 +41,7 @@ def train(seed=42, reward_fn="diff-waiting-time",
     final_path = checkpoint_dir / "final.zip"
 
     if final_path.exists():
-        print(f"[ippo] {scenario}/{tag}: already trained, skipping")
+        print(f"[ippo] {scenario}/{tag}: done, skipping")
         return final_path
 
     sumo_path = Path(sumo_rl.__file__).parent
@@ -66,39 +74,51 @@ def train(seed=42, reward_fn="diff-waiting-time",
         env, num_vec_envs=1, num_cpus=1, base_class="stable_baselines3",
     )
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        tensorboard_log=str(tb_dir),
-        seed=seed,
-        verbose=1,
-        learning_rate=3.0e-4,
-        n_steps=1024,
-        batch_size=128,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-    )
+    ckpt_path, steps_done = latest_checkpoint(checkpoint_dir, "ippo")
+    if ckpt_path is not None and steps_done < timesteps:
+        print(f"[ippo] {scenario}/{tag}: resuming from {steps_done:,} steps")
+        model = PPO.load(str(ckpt_path), env=env, tensorboard_log=str(tb_dir))
+        remaining = timesteps - steps_done
+        reset_timesteps = False
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            tensorboard_log=str(tb_dir),
+            seed=seed,
+            verbose=0,   # quiet: watch progress in TensorBoard instead
+            learning_rate=3.0e-4,
+            n_steps=1024,
+            batch_size=128,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+        )
+        remaining = timesteps
+        reset_timesteps = True
 
     callbacks = [
-        CheckpointCallback(save_freq=50000, save_path=str(checkpoint_dir), name_prefix="ippo"),
+        CheckpointCallback(save_freq=SAVE_FREQ, save_path=str(checkpoint_dir),
+                           name_prefix="ippo"),
     ]
 
-    print(f"[ippo] training {scenario}/{tag} for {timesteps:,} steps")
+    print(f"[ippo] {scenario}/{tag}: training {remaining:,} steps ...", flush=True)
+    t0 = time.time()
     try:
         model.learn(
-            total_timesteps=timesteps,
+            total_timesteps=remaining,
             callback=callbacks,
             tb_log_name=scenario,
-            progress_bar=True,
+            reset_num_timesteps=reset_timesteps,
+            progress_bar=False,   # tqdm in a notebook over long runs bloats output
         )
-    finally:
         model.save(str(final_path))
+        print(f"[ippo] {scenario}/{tag}: done in {(time.time() - t0) / 60:.1f} min", flush=True)
+    finally:
         env.close()
-        print(f"[ippo] saved -> {final_path}")
 
     return final_path
